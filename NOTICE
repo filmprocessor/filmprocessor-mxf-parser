@@ -1,0 +1,9 @@
+FilmProcessor MXF Parser
+Copyright (c) 2026 Psyché Tropes Limited
+
+This package is extracted from FilmProcessor's browser media tooling and is
+published as a standalone read-only MXF parser utility.
+
+No FilmProcessor private application code, server endpoint configuration,
+credentials, production deployment settings, commercial fonts, or brand assets
+are intentionally included in this package.

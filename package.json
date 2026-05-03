@@ -1,0 +1,37 @@
+{
+  "name": "@filmprocessor/mxf-parser",
+  "version": "0.1.0",
+  "description": "Read-only JavaScript MXF parser helpers for SMPTE KLV and DCP-oriented MXF metadata.",
+  "type": "module",
+  "exports": "./src/index.js",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "SECURITY.md"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "scan": "node scripts/security-scan.js"
+  },
+  "keywords": [
+    "mxf",
+    "smpte",
+    "klv",
+    "dcp",
+    "javascript"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/filmprocessor/filmprocessor-mxf-parser.git"
+  },
+  "bugs": {
+    "url": "https://github.com/filmprocessor/filmprocessor-mxf-parser/issues"
+  },
+  "homepage": "https://github.com/filmprocessor/filmprocessor-mxf-parser#readme",
+  "engines": {
+    "node": ">=20"
+  }
+}
