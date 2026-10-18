@@ -5,7 +5,7 @@
  * for DCP (Digital Cinema Package) MXF files. Used by both the media player and transcoder.
  *
  * Standards: SMPTE ST 377-1 (MXF), ST 379-1 (GC), ST 382M (AES3 audio),
- *            ST 377-4 (MCA), ST 429-2/3 (DCP picture/audio)
+ *            ST 377-4 (MCA), ST 429-2/3 (DCP picture/audio), ST 429-10 (stereoscopic picture)
  */
 
 // ─── SMPTE Universal Labels ─────────────────────────────────────────────────
@@ -13,28 +13,44 @@
 const UL_RGBA_DESC = [0x06,0x0e,0x2b,0x34,0x02,0x53,0x01,0x01,0x0d,0x01,0x01,0x01,0x01,0x01,0x29];
 const UL_CDCI_DESC = [0x06,0x0e,0x2b,0x34,0x02,0x53,0x01,0x01,0x0d,0x01,0x01,0x01,0x01,0x01,0x28];
 const UL_WAVE_DESC = [0x06,0x0e,0x2b,0x34,0x02,0x53,0x01,0x01,0x0d,0x01,0x01,0x01,0x01,0x01,0x48];
-const UL_MCA_SUBDESC = [0x06,0x0e,0x2b,0x34,0x02,0x53,0x01,0x01,0x0d,0x01,0x01,0x01,0x01,0x01,0x5C];
+const UL_MCA_CHANNEL_SUBDESC = [0x06,0x0e,0x2b,0x34,0x02,0x53,0x01,0x01,0x0d,0x01,0x01,0x01,0x01,0x01,0x6b];
+// Primer Pack — maps this file's dynamic local tags to the ULs they stand for.
+const UL_PRIMER_PACK = [0x06,0x0e,0x2b,0x34,0x02,0x05,0x01,0x01,0x0d,0x01,0x02,0x01,0x01,0x05,0x01];
+// The MCA item ULs, resolved through the Primer Pack rather than by guessing a
+// local tag — local tags are per-file, and only the primer says what they mean.
+const UL_MCA_LABEL_DICT_ID = '060e2b340101010e0103070101000000';
+const UL_MCA_CHANNEL_ID    = '060e2b340101010e0103040a00000000';
+const UL_STEREO_SUBDESC = [0x06,0x0e,0x2b,0x34,0x02,0x53,0x01,0x01,0x0d,0x01,0x01,0x01,0x01,0x01,0x63];
+// SMPTE ST 429-6 CryptographicContext set — its presence in header metadata
+// marks the file as encrypted (essence is EncryptedTriplet KLVs, not plaintext
+// picture/sound elements, so the frame index and codestream reads cannot work
+// without the content key).
+const UL_CRYPTO_CONTEXT = [0x06,0x0e,0x2b,0x34,0x02,0x53,0x01,0x01,0x0d,0x01,0x04,0x01,0x02,0x02,0x00];
+// EncryptedTriplet essence element key (ST 429-6).
+const UL_CRYPT_ESSENCE = [0x06,0x0e,0x2b,0x34,0x02,0x04,0x01,0x01,0x0d,0x01,0x03,0x01,0x02,0x7e,0x01];
 
 // SMPTE ST 429-2 well-known channel label UL suffixes (last 4 bytes)
+// SMPTE DC audio channel labels, keyed on UL bytes 8-11 — the discriminating
+// bytes. (Bytes 12-15 are 00000000 for every DC audio label, so keying on those
+// matched nothing and this table returned null for every real DCP.)
+// Values mirror tools/fixtures/smpte-mca-registry.json (asdcplib MDD.cpp).
 const CHANNEL_LABELS = {
-  '00010001': 'L',
-  '00010002': 'R',
-  '00010003': 'C',
-  '00010004': 'LFE',
-  '00010005': 'Ls',
-  '00010006': 'Rs',
-  '00010007': 'Lrs',
-  '00010008': 'Rrs',
-  '00010009': 'Lw',
-  '0001000a': 'Rw',
-  '00010011': 'Ltf',
-  '00010012': 'Rtf',
-  '00010013': 'Ltr',
-  '00010014': 'Rtr',
-  '00010015': 'Ltb',
-  '00010016': 'Rtb',
-  '00020001': 'HI',
-  '00020002': 'VIN',
+  '03020101': 'L',
+  '03020102': 'R',
+  '03020103': 'C',
+  '03020104': 'LFE',
+  '03020105': 'Ls',
+  '03020106': 'Rs',
+  '03020107': 'Lss',
+  '03020108': 'Rss',
+  '03020109': 'Lrs',
+  '0302010a': 'Rrs',
+  '0302010b': 'Lc',
+  '0302010c': 'Rc',
+  '0302010d': 'Cs',
+  '0302010e': 'HI',
+  '0302010f': 'VIN',
+  '03020110': 'FSKSync',
 };
 
 // ─── Low-Level Helpers ───────────────────────────────────────────────────────
@@ -196,8 +212,9 @@ export async function parseMXFMetadata(mxfFile) {
   }
 
   let width = 0, height = 0, frameRate = 24, bitDepth = 12;
+  let pictureRateNumerator = null, pictureRateDenominator = null;
   let audioSampleRate = 0, audioBitDepth = 0, audioChannels = 0;
-  let foundVideo = false, foundAudio = false;
+  let foundVideo = false, foundAudio = false, stereoscopic = false, encrypted = false;
 
   let pos = 0;
   while (pos + 16 < hdr.length) {
@@ -209,6 +226,11 @@ export async function parseMXFMetadata(mxfFile) {
     pos += ber.bytesRead;
     const valEnd = Math.min(pos + ber.length, hdr.length);
 
+    // ST 429-6 CryptographicContext — the file is encrypted.
+    if (matchUL(hdr, keyStart, UL_CRYPTO_CONTEXT)) {
+      encrypted = true;
+    }
+
     // RGBA or CDCI Essence Descriptor
     if (matchUL(hdr, keyStart, UL_RGBA_DESC) || matchUL(hdr, keyStart, UL_CDCI_DESC)) {
       foundVideo = true;
@@ -219,7 +241,10 @@ export async function parseMXFMetadata(mxfFile) {
         const dv = new DataView(props[0x3001].buffer, props[0x3001].byteOffset);
         const num = dv.getUint32(0, false);
         const denom = dv.getUint32(4, false);
-        if (denom > 0) frameRate = num / denom;
+        if (num > 0 && denom > 0) {
+          pictureRateNumerator = num;
+          pictureRateDenominator = denom;
+        }
       }
       if (props[0x3301]?.length >= 4) bitDepth = new DataView(props[0x3301].buffer, props[0x3301].byteOffset).getUint32(0, false);
     }
@@ -232,6 +257,11 @@ export async function parseMXFMetadata(mxfFile) {
       if (props[0x3D01]?.length >= 4) audioBitDepth = new DataView(props[0x3D01].buffer, props[0x3D01].byteOffset).getUint32(0, false);
       if (props[0x3D07]?.length >= 4) audioChannels = new DataView(props[0x3D07].buffer, props[0x3D07].byteOffset).getUint32(0, false);
     }
+
+    // StereoscopicPictureSubDescriptor (SMPTE ST 429-10)
+    if (matchUL(hdr, keyStart, UL_STEREO_SUBDESC)) {
+      stereoscopic = true;
+    }
     pos = valEnd;
   }
 
@@ -239,10 +269,58 @@ export async function parseMXFMetadata(mxfFile) {
   if (width === 0) width = 2048;
   if (height === 0) height = 1080;
 
+  // ST 429-10: the picture descriptor SampleRate is twice the track edit rate
+  // (left + right eye per edit unit). Keep the parsed rational as proof of the
+  // exact edit rate; `frameRate` remains the compatibility scalar used by older
+  // consumers. A missing/invalid SampleRate retains the legacy display fallback
+  // but carries no edit-rate proof, so cadence-sensitive consumers can fail
+  // closed instead of mistaking the fallback for package metadata.
+  let editRate = null;
+  if (foundVideo && pictureRateNumerator !== null && pictureRateDenominator !== null) {
+    let numerator = pictureRateNumerator;
+    let denominator = pictureRateDenominator * (stereoscopic ? 2 : 1);
+    let a = numerator;
+    let b = denominator;
+    while (b !== 0) [a, b] = [b, a % b];
+    numerator /= a;
+    denominator /= a;
+    editRate = { numerator, denominator };
+    frameRate = numerator / denominator;
+  }
+
   return {
-    video: foundVideo ? { width, height, frameRate, bitDepth } : null,
+    video: foundVideo ? { width, height, frameRate, editRate, bitDepth, stereoscopic } : null,
     audio: foundAudio ? { sampleRate: audioSampleRate, bitDepth: audioBitDepth, channelCount: audioChannels } : null,
+    stereoscopic,
+    encrypted,
   };
+}
+
+/**
+ * Fast check for SMPTE ST 429-6 encrypted essence. Encrypted MXFs keep their
+ * plaintext RGBA/Wave descriptor (so probeMXFType still reports video/audio) but
+ * carry a CryptographicContext set and EncryptedTriplet essence — the frame
+ * index and codestream reads cannot work without the content key, so consumers
+ * must branch on this instead of silently producing a zero-frame index.
+ * @param {File} mxfFile
+ * @returns {Promise<boolean>}
+ */
+export async function isEncryptedMXF(mxfFile) {
+  const headerSize = Math.min(mxfFile.size, 2 * 1024 * 1024);
+  const hdr = new Uint8Array(await mxfFile.slice(0, headerSize).arrayBuffer());
+  if (hdr.length < 16 || !isSMPTEKey(hdr, 0)) return false;
+
+  let pos = 0;
+  while (pos + 16 < hdr.length) {
+    if (!isSMPTEKey(hdr, pos)) { pos++; continue; }
+    if (matchUL(hdr, pos, UL_CRYPTO_CONTEXT)) return true;
+    pos += 16;
+    if (pos >= hdr.length) break;
+    const ber = decodeBER(hdr, pos);
+    pos += ber.bytesRead;
+    if (ber.length > 0) pos += ber.length;
+  }
+  return false;
 }
 
 /**
@@ -253,19 +331,38 @@ export async function parseMXFMetadata(mxfFile) {
  *   Pass 1: KLV scan for SMPTE picture element ULs
  *   Pass 2: Fallback J2K SOC marker scan if Pass 1 finds nothing
  *
+ * Stereoscopic MXFs (SMPTE ST 429-10) interleave two picture elements per
+ * edit unit (left eye, then right eye) under the same picture element key.
+ * When the header carries a StereoscopicPictureSubDescriptor, the returned
+ * index is edit-unit-based: one entry per edit unit pointing at the left-eye
+ * codestream, with the right eye attached as `rightEye: {offset, size}` —
+ * so 2D consumers play the left eye at the correct cadence.
+ *
  * @param {File} mxfFile
  * @param {function(number):void} [progressCallback] - Called with frame count periodically
  * @param {function(...any):void} [log] - Optional logger
- * @returns {Promise<Array<{offset: number, size: number}>>}
+ * @returns {Promise<Array<{offset: number, size: number, rightEye?: {offset: number, size: number}}>>}
  */
 export async function buildMXFFrameIndex(mxfFile, progressCallback = null, log = null) {
   const _log = log || (() => {});
+
+  // ST 429-6: encrypted essence is EncryptedTriplet KLVs, not plaintext picture
+  // elements — indexing/decoding is impossible without the content key. Fail
+  // with a clear signal instead of returning a silent zero-frame index that
+  // downstream consumers would misread as a corrupt or empty file.
+  if (await isEncryptedMXF(mxfFile)) {
+    const error = new Error('This MXF is encrypted (SMPTE ST 429-6). Playback and transcoding require the content key / KDM, which this tool does not decrypt.');
+    error.code = 'ENCRYPTED_MXF';
+    throw error;
+  }
+
   const frameIndex = [];
   const chunkSize = 4 * 1024 * 1024;
   const overlap = 32;
   let fileOffset = 0;
   const t0 = performance.now();
   let firstKLVLogged = false;
+  let stereoscopic = false;
 
   // Pass 1: KLV-based scan for PICTURE_ELEMENT keys
   while (fileOffset < mxfFile.size) {
@@ -285,6 +382,12 @@ export async function buildMXFFrameIndex(mxfFile, progressCallback = null, log =
         firstKLVLogged = true;
       }
 
+      // StereoscopicPictureSubDescriptor (SMPTE ST 429-10) in header metadata
+      if (!stereoscopic && matchUL(chunk, p, UL_STEREO_SUBDESC)) {
+        stereoscopic = true;
+        _log(`StereoscopicPictureSubDescriptor @${readStart + p} — ST 429-10 left/right interleaved essence`);
+      }
+
       if (isPictureElement(chunk, p)) {
         const ber = decodeBER(chunk, p + 16);
         if (ber.length > 0) {
@@ -297,7 +400,7 @@ export async function buildMXFFrameIndex(mxfFile, progressCallback = null, log =
           }
 
           if (progressCallback && frameIndex.length % 100 === 0) {
-            progressCallback(frameIndex.length);
+            progressCallback(stereoscopic ? frameIndex.length / 2 : frameIndex.length);
           }
 
           const totalKLV = klvHdr + ber.length;
@@ -327,8 +430,11 @@ export async function buildMXFFrameIndex(mxfFile, progressCallback = null, log =
       continue;
     }
 
+    // At EOF the complete final window has already been scanned. Re-reading
+    // its overlap can append the final picture element a second time.
+    if (readEnd === mxfFile.size) break;
     if (fileOffset <= readStart) {
-      const nextOffset = readEnd > overlap ? readEnd - overlap : readEnd;
+      const nextOffset = Math.max(readStart + p, readEnd > overlap ? readEnd - overlap : readEnd);
       if (nextOffset <= readStart) break;
       fileOffset = nextOffset;
     }
@@ -371,7 +477,7 @@ export async function buildMXFFrameIndex(mxfFile, progressCallback = null, log =
             if (frameSize > 1000) {
               frameIndex.push({ offset: fileOffset + p, size: frameSize });
               if (progressCallback && frameIndex.length % 100 === 0) {
-                progressCallback(frameIndex.length);
+                progressCallback(stereoscopic ? frameIndex.length / 2 : frameIndex.length);
               }
               p = frameEnd - 1;
             }
@@ -385,6 +491,23 @@ export async function buildMXFFrameIndex(mxfFile, progressCallback = null, log =
     _log(`Pass 2 (J2K SOC fallback): ${frameIndex.length} frames`);
   }
 
+  // ST 429-10 stereoscopic: fold interleaved left/right picture elements into
+  // one edit-unit entry each — left eye as the primary {offset, size}, right
+  // eye attached — so consumers see edit units, not doubled eye-frames.
+  if (stereoscopic && frameIndex.length > 0) {
+    if (frameIndex.length % 2 !== 0) {
+      console.warn(`Stereoscopic MXF has odd picture element count (${frameIndex.length}) — dropping unpaired trailing element`);
+    }
+    const editUnits = Math.floor(frameIndex.length / 2);
+    for (let i = 0; i < editUnits; i++) {
+      const left = frameIndex[i * 2];
+      const right = frameIndex[i * 2 + 1];
+      frameIndex[i] = { offset: left.offset, size: left.size, rightEye: { offset: right.offset, size: right.size } };
+    }
+    frameIndex.length = editUnits;
+    _log(`Stereoscopic fold: ${editUnits} edit units (left/right paired)`);
+  }
+
   const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
   _log(`Frame index complete: ${frameIndex.length} frames from ${(mxfFile.size / 1024 / 1024).toFixed(1)}MB file (${elapsed}s)`);
   return frameIndex;
@@ -395,13 +518,59 @@ export async function buildMXFFrameIndex(mxfFile, progressCallback = null, log =
  * @param {Uint8Array} headerData - MXF header bytes (typically first 2MB)
  * @returns {Array<{channelIndex: number, label: string}>|null}
  */
+/**
+ * Build the file's local-tag → UL map from its Primer Pack.
+ *
+ * MXF local tags in the dynamic range (0x8000+) mean nothing on their own — each
+ * file declares what they stand for. Reading a set by a guessed tag therefore
+ * works only by luck, which is why this parser previously found nothing in any
+ * real DCP (ours writes 0x8001+, the old code looked for 0x3F01/0x3F02).
+ *
+ * @returns {Map<number,string>} local tag → 32-char hex UL
+ */
+function parsePrimerPack(headerData) {
+  const map = new Map();
+  for (let pos = 0; pos + 20 < headerData.length; pos++) {
+    if (headerData[pos] !== 0x06 || headerData[pos + 1] !== 0x0e) continue;
+    if (!matchUL(headerData, pos, UL_PRIMER_PACK)) continue;
+
+    const ber = decodeBER(headerData, pos + 16);
+    let p = pos + 16 + ber.bytesRead;
+    const end = Math.min(p + ber.length, headerData.length);
+    if (p + 8 > end) break;
+
+    const count = new DataView(headerData.buffer, headerData.byteOffset + p).getUint32(0, false);
+    const itemLength = new DataView(headerData.buffer, headerData.byteOffset + p + 4).getUint32(0, false);
+    p += 8;
+    if (itemLength !== 18) break;   // each entry is a 2-byte tag + a 16-byte UL
+
+    for (let i = 0; i < count && p + 18 <= end; i++, p += 18) {
+      const tag = (headerData[p] << 8) | headerData[p + 1];
+      const ul = Array.from(headerData.subarray(p + 2, p + 18))
+        .map((b) => b.toString(16).padStart(2, '0')).join('');
+      map.set(tag, ul);
+    }
+    break;   // the first Primer Pack governs this partition's header metadata
+  }
+  return map;
+}
+
 export function parseMCALabels(headerData) {
   const labels = [];
-  let pos = 0;
+  const primer = parsePrimerPack(headerData);
+  // Resolve the local tags this particular file uses for the MCA items we need.
+  const tagFor = (targetUL) => {
+    for (const [tag, ul] of primer) if (ul === targetUL) return tag;
+    return null;
+  };
+  const tagLabelDictID = tagFor(UL_MCA_LABEL_DICT_ID);
+  const tagChannelID = tagFor(UL_MCA_CHANNEL_ID);
+  if (tagLabelDictID === null || tagChannelID === null) return null;
 
+  let pos = 0;
   while (pos + 20 < headerData.length) {
     if (headerData[pos] !== 0x06 || headerData[pos+1] !== 0x0e) { pos++; continue; }
-    if (!matchUL(headerData, pos, UL_MCA_SUBDESC)) { pos++; continue; }
+    if (!matchUL(headerData, pos, UL_MCA_CHANNEL_SUBDESC)) { pos++; continue; }
 
     const ber = decodeBER(headerData, pos + 16);
     const setStart = pos + 16 + ber.bytesRead;
@@ -412,16 +581,19 @@ export function parseMCALabels(headerData) {
       let channelIndex = -1;
       let label = null;
 
-      // Tag 0x3F01 = MCA Channel ID (1-based)
-      if (props[0x3F01]?.length >= 4) {
-        channelIndex = new DataView(props[0x3F01].buffer, props[0x3F01].byteOffset).getUint32(0, false) - 1;
+      // MCAChannelID is 1-based in the file; callers index from 0.
+      const idBytes = props[tagChannelID];
+      if (idBytes?.length >= 4) {
+        channelIndex = new DataView(idBytes.buffer, idBytes.byteOffset).getUint32(0, false) - 1;
       }
-      // Tag 0x3F02 = MCA Label Dictionary ID (16-byte UL)
-      if (props[0x3F02]?.length >= 16) {
-        const suffix = Array.from(props[0x3F02].slice(12, 16))
+      // MCALabelDictionaryID: bytes 8-11 carry the channel identity. Bytes 12-15
+      // are 00000000 for every DC audio label, so keying on those matched nothing.
+      const ulBytes = props[tagLabelDictID];
+      if (ulBytes?.length >= 16) {
+        const identity = Array.from(ulBytes.slice(8, 12))
           .map(b => b.toString(16).padStart(2, '0'))
           .join('');
-        label = CHANNEL_LABELS[suffix] || null;
+        label = CHANNEL_LABELS[identity] || null;
       }
 
       if (channelIndex >= 0 && label) {

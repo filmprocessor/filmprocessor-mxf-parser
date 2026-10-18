@@ -47,7 +47,7 @@ Not included:
 
 - MXF writing
 - DCP authoring
-- encrypted AS-DCP handling
+- encrypted AS-DCP decryption (encrypted input is detected and refused by the frame indexer)
 - JPEG2000 decoding
 - playback scheduling
 - color conversion
@@ -55,7 +55,21 @@ Not included:
 
 ## Status
 
-Initial public extraction. Expect API changes before `1.0.0`.
+Source synchronized with FilmProcessor’s 17 October 2026 application release.
+Expect API changes before `1.0.0`.
+
+### 0.2.0
+
+- `parseMXFMetadata()` exposes `encrypted`, `stereoscopic` and an exact
+  `video.editRate` rational (null when the source rate is unavailable).
+- Stereoscopic frame indexes contain one entry per edit unit, with the left
+  eye at `offset`/`size` and the second eye at `rightEye`.
+- `isEncryptedMXF()` detects cryptographic context metadata; frame indexing
+  rejects encrypted input with `error.code === "ENCRYPTED_MXF"`.
+- Frame indexing avoids counting the final picture twice when scanning overlaps.
+- MCA labels resolve the file’s Primer Pack and preserve carrier channel slots.
+
+Consumers that counted individual eye frames must adapt to edit-unit indexing.
 
 ## Security
 
