@@ -7,3 +7,6 @@ published as a standalone read-only MXF parser utility.
 No FilmProcessor private application code, server endpoint configuration,
 credentials, production deployment settings, commercial fonts, or brand assets
 are intentionally included in this package.
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+Original source: https://github.com/filmprocessor/filmprocessor-mxf-parser

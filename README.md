@@ -79,4 +79,10 @@ crashes or excessive CPU/memory behavior through `SECURITY.md`.
 
 ## License
 
-MIT. See `LICENSE`.
+Apache-2.0. See `LICENSE`.
+
+## Licence history
+
+Version 0.3.0 adopts Apache License 2.0 for this project. Earlier published
+versions through 0.2.0 retain their MIT licence. Third-party dependencies
+retain their own licences. See `LICENSE` and `NOTICE`.
